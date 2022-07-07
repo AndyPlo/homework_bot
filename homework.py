@@ -18,8 +18,8 @@ load_dotenv()
 PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-RETRY_TIME = 10
-ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuse/'
+RETRY_TIME = 600
+ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
 HOMEWORK_STATUSES = {
     'approved': 'Работа проверена: ревьюеру всё понравилось. Ура!',
@@ -27,6 +27,7 @@ HOMEWORK_STATUSES = {
     'rejected': 'Работа проверена: у ревьюера есть замечания.'
 }
 homework_status_cache = {}
+last_message_cache = ''
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -37,10 +38,13 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 
 
-def logger_error(message):
+def logger_error(bot, message):
     """Логирует ошибку и отправляет сообщение."""
     logger.error(message)
-    send_message(Bot(token=TELEGRAM_TOKEN), message)
+    global last_message_cache
+    if message != last_message_cache:
+        send_message(bot, message)
+        last_message_cache = message
 
 
 def send_message(bot, message):
@@ -57,20 +61,14 @@ def get_api_answer(current_timestamp):
     timestamp = current_timestamp or int(time.time())
     params = {'from_date': timestamp}
     response = requests.get(ENDPOINT, headers=HEADERS, params=params)
-    if response.status_code == 200:
-        return response.json()
-    logger_error(
-        f'Эндпоинт {ENDPOINT} не доступен. Код ответа: {response.status_code}'
-    )
-    return {}
+    return (response.json() if response.status_code == 200
+            else response.status_code)
 
 
 def check_response(response):
     """Возвращает список домашних работ."""
-    if response.get('homeworks') is not None:
-        return response.get('homeworks')
-    logger_error('Ответ API не содержит ожидаемых ключей')
-    return {}
+    homeworks = response.get('homeworks')
+    return None if homeworks is None else homeworks
 
 
 def parse_status(homework):
@@ -78,10 +76,18 @@ def parse_status(homework):
     global homework_status_cache
     homework_name = homework.get('homework_name')
     homework_status = homework.get('status')
-    if homework_status != homework_status_cache.get(homework_name):
-        verdict = HOMEWORK_STATUSES[homework_status]
-        homework_status_cache[homework_name] = homework_status
-        return f'Изменился статус проверки работы "{homework_name}". {verdict}'
+    verdict = HOMEWORK_STATUSES.get(homework_status)
+    if verdict is not None:
+        if homework_status != homework_status_cache.get(homework_name):
+            homework_status_cache[homework_name] = homework_status
+            return (f'Изменился статус проверки работы "{homework_name}". '
+                    f'{verdict}')
+        logger.debug(f'Статус работы "{homework_name}" не изменился')
+        return
+    logger_error(
+        Bot(token=TELEGRAM_TOKEN),
+        f'Неизвестный статус "{homework_status}" у работы "{homework_name}"'
+    )
 
 
 def check_tokens():
@@ -96,13 +102,23 @@ def main():
     if not check_tokens():
         raise logger.critical('Отсутствуют обязательные переменные окружения!')
     bot = Bot(token=TELEGRAM_TOKEN)
-    logger.info('--- Бот запущен ---')
     send_message(bot, '--- Бот запущен ---')
     current_timestamp = int(time.time()) - (20 * 24 * 60 * 60)
     while True:
         try:
             response = get_api_answer(current_timestamp)
+            if type(response) == int:
+                message = (f'Проблема с доступом к {ENDPOINT}. '
+                           f'Код ответа: {response}')
+                logger_error(bot, message)
+                time.sleep(RETRY_TIME)
+                continue
             homeworks = check_response(response)
+            if homeworks is None:
+                message = 'В ответе API  отсутствует ключ "homeworks"'
+                logger_error(bot, message)
+                time.sleep(RETRY_TIME)
+                continue
             for homework in homeworks:
                 message = parse_status(homework)
                 if message:
@@ -111,10 +127,8 @@ def main():
             time.sleep(RETRY_TIME)
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
-            logger_error(message)
+            logger_error(bot, message)
             time.sleep(RETRY_TIME)
-        # else:
-        #     ...
 
 
 if __name__ == '__main__':
