@@ -27,7 +27,6 @@ HOMEWORK_STATUSES = {
     'rejected': 'Работа проверена: у ревьюера есть замечания.'
 }
 homework_status_cache = {}
-last_message_cache = ''
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -36,15 +35,6 @@ handler = logging.StreamHandler(stream=sys.stdout)
 formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
 handler.setFormatter(formatter)
 logger.addHandler(handler)
-
-
-def logger_error(bot, message):
-    """Логирует ошибку и отправляет сообщение."""
-    logger.error(message)
-    global last_message_cache
-    if message != last_message_cache:
-        send_message(bot, message)
-        last_message_cache = message
 
 
 def send_message(bot, message):
@@ -61,33 +51,42 @@ def get_api_answer(current_timestamp):
     timestamp = current_timestamp or int(time.time())
     params = {'from_date': timestamp}
     response = requests.get(ENDPOINT, headers=HEADERS, params=params)
-    return (response.json() if response.status_code == 200
-            else response.status_code)
+    if response.status_code != 200:
+        raise Exception(f'Проблема с доступом к {ENDPOINT}. '
+                        f'Код ответа: {response.status_code}')
+    return response.json()
 
 
 def check_response(response):
     """Возвращает список домашних работ."""
-    homeworks = response.get('homeworks')
-    return None if homeworks is None else homeworks
+    homeworks = response['homeworks']
+    if homeworks is None:
+        raise Exception('Ответ API не содержит ключа "homeworks"')
+    elif type(homeworks) is not list:
+        raise Exception('Ключ "homeworks" не является словарем')
+    elif homeworks == []:
+        raise Exception('Словарь "homeworks" пуст')
+    return homeworks
 
 
 def parse_status(homework):
     """Получает статус домашней работы."""
     global homework_status_cache
     homework_name = homework.get('homework_name')
+    if homework_name is None:
+        raise KeyError('Ответ API не содержит ключа "homework_name"')
     homework_status = homework.get('status')
+    if homework_status is None:
+        raise Exception('Ответ API не содержит ключа "homework_status"')
     verdict = HOMEWORK_STATUSES.get(homework_status)
-    if verdict is not None:
-        if homework_status != homework_status_cache.get(homework_name):
-            homework_status_cache[homework_name] = homework_status
-            return (f'Изменился статус проверки работы "{homework_name}". '
-                    f'{verdict}')
-        logger.debug(f'Статус работы "{homework_name}" не изменился')
-        return
-    logger_error(
-        Bot(token=TELEGRAM_TOKEN),
-        f'Неизвестный статус "{homework_status}" у работы "{homework_name}"'
-    )
+    if verdict is None:
+        raise Exception(f'Неизвестный статус "{homework_status}" '
+                        f'у работы "{homework_name}"')
+    if homework_status != homework_status_cache.get(homework_name):
+        homework_status_cache[homework_name] = homework_status
+        return (f'Изменился статус проверки работы "{homework_name}". '
+                f'{verdict}')
+    logger.debug(f'Статус работы "{homework_name}" не изменился')
 
 
 def check_tokens():
@@ -100,34 +99,28 @@ def check_tokens():
 def main():
     """Основная логика работы бота."""
     if not check_tokens():
-        raise logger.critical('Отсутствуют обязательные переменные окружения!')
+        raise logger.critical('Отсутствуют обязательные переменные окружения. '
+                              'Программа остановлена!')
+    last_message_cache = ''
     bot = Bot(token=TELEGRAM_TOKEN)
     send_message(bot, '--- Бот запущен ---')
-    current_timestamp = int(time.time()) - (20 * 24 * 60 * 60)
+    current_timestamp = int(time.time())
     while True:
         try:
             response = get_api_answer(current_timestamp)
-            if type(response) == int:
-                message = (f'Проблема с доступом к {ENDPOINT}. '
-                           f'Код ответа: {response}')
-                logger_error(bot, message)
-                time.sleep(RETRY_TIME)
-                continue
             homeworks = check_response(response)
-            if homeworks is None:
-                message = 'В ответе API  отсутствует ключ "homeworks"'
-                logger_error(bot, message)
-                time.sleep(RETRY_TIME)
-                continue
             for homework in homeworks:
                 message = parse_status(homework)
                 if message:
                     send_message(bot, message)
-            current_timestamp = int(time.time()) - (20 * 24 * 60 * 60)
+            current_timestamp = int(time.time())
             time.sleep(RETRY_TIME)
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
-            logger_error(bot, message)
+            logger.error(message)
+            if message != last_message_cache:
+                send_message(bot, message)
+                last_message_cache = message
             time.sleep(RETRY_TIME)
 
 
