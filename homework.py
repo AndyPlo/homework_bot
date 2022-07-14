@@ -6,11 +6,14 @@
 
 import os
 import sys
-import logging
-import requests
 import time
+import logging
+from json import decoder
+from http import HTTPStatus
+
+import requests
+from telegram import Bot, TelegramError
 from dotenv import load_dotenv
-from telegram import Bot
 
 load_dotenv()
 
@@ -19,7 +22,7 @@ PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 RETRY_TIME = 600
-ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
+ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuse/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
 HOMEWORK_STATUSES = {
     'approved': 'Работа проверена: ревьюеру всё понравилось. Ура!',
@@ -37,34 +40,51 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 
 
+class CustomException(Exception):
+    """Создание своего типа исключения."""
+
+    pass
+
+
 def send_message(bot, message):
     """Отправляет сообщение в Telegram."""
     try:
         bot.send_message(TELEGRAM_CHAT_ID, message)
         logger.info(f'Сообщение отправлено: {message}')
+    except TelegramError as error:
+        logger.error(f'Сбой при отправке сообщения: {error}')
     except Exception as error:
         logger.error(f'Сбой при отправке сообщения: {error}')
 
 
 def get_api_answer(current_timestamp):
     """Делает запрос к API ЯндексПрактикум."""
-    timestamp = current_timestamp or int(time.time())
+    timestamp = current_timestamp
     params = {'from_date': timestamp}
-    response = requests.get(ENDPOINT, headers=HEADERS, params=params)
-    if response.status_code != 200:
-        raise Exception(f'Проблема с доступом к {ENDPOINT}. '
-                        f'Код ответа: {response.status_code}')
-    return response.json()
+    try:
+        response = requests.get(ENDPOINT, headers=HEADERS, params=params)
+    except requests.exceptions.RequestException as error:
+        raise SystemExit(f'Эндпоинт не доступен: {error}')
+    if response.status_code != HTTPStatus.OK:
+        raise CustomException(f'Проблема с доступом к {ENDPOINT}. '
+                              f'Код ответа: {response.status_code}')
+    try:
+        return response.json()
+    except decoder.JSONDecodeError as error:
+        raise decoder.JSONDecodeError(
+            f'Ответ API не преобразуется в JSON: {error}'
+        )
 
 
 def check_response(response):
     """Возвращает список домашних работ."""
-    homeworks = response['homeworks']
-    if homeworks is None:
-        raise Exception('Ответ API не содержит ключа "homeworks"')
-    elif type(homeworks) is not list:
+    try:
+        homeworks = response['homeworks']
+    except KeyError:
+        raise KeyError('Ответ API не содержит ключа "homeworks"')
+    if type(homeworks) is not list:
         raise Exception('Ключ "homeworks" не является словарем')
-    elif homeworks == []:
+    elif len(homeworks) == 0:
         raise Exception('Словарь "homeworks" пуст')
     return homeworks
 
@@ -104,7 +124,7 @@ def main():
     last_message_cache = ''
     bot = Bot(token=TELEGRAM_TOKEN)
     send_message(bot, '--- Бот запущен ---')
-    current_timestamp = int(time.time())
+    current_timestamp = int(time.time()) - 1
     while True:
         try:
             response = get_api_answer(current_timestamp)
@@ -113,7 +133,7 @@ def main():
                 message = parse_status(homework)
                 if message:
                     send_message(bot, message)
-            current_timestamp = int(time.time())
+            current_timestamp = int(time.time()) - 1
             time.sleep(RETRY_TIME)
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
